@@ -56,13 +56,12 @@ class TextBlock extends MQNode {
   parser() {
     var textBlock = this;
 
-    // TODO: correctly parse text mode
     var string = Parser.string;
     var regex = Parser.regex;
     var optWhitespace = Parser.optWhitespace;
     return optWhitespace
       .then(string('{'))
-      .then(regex(/^[^}]*/))
+      .then(regex(/^(.*?)(?=}$)/))
       .skip(string('}'))
       .map(function (text) {
         if (text.length === 0) return new Fragment(0, 0);
@@ -86,9 +85,7 @@ class TextBlock extends MQNode {
     var contents = this.textContents();
     if (contents.length > 0) {
       ctx.latex += this.ctrlSeq + '{';
-      ctx.latex += contents
-        .replace(/\\/g, '\\backslash ')
-        .replace(/[{}]/g, '\\$&');
+      ctx.latex += contents.replace(/\\/g, '\\\\').replace(/[{}]/g, '\\$&');
       ctx.latex += '}';
     }
 
@@ -125,10 +122,8 @@ class TextBlock extends MQNode {
   // and selection of the MathQuill tree, these all take in a direction and
   // the cursor
   moveTowards(dir: Direction, cursor: Cursor) {
-    cursor.insAtDirEnd(-dir as Direction, this);
-    cursor.controller.aria
-      .queueDirEndOf(-dir as Direction)
-      .queue(cursor.parent, true);
+    cursor.insDirOf(dir, this);
+    cursor.controller.aria.queueDirOf(dir).queue(this);
   }
   moveOutOf(dir: Direction, cursor: Cursor) {
     cursor.insDirOf(dir, this);
@@ -140,10 +135,11 @@ class TextBlock extends MQNode {
 
   // TODO: make these methods part of a shared mixin or something.
   selectTowards(dir: Direction, cursor: Cursor) {
-    MathCommand.prototype.selectTowards.call(this, dir, cursor);
+    cursor.insDirOf(dir, this);
+    cursor.controller.aria.queueDirOf(dir).queue(this);
   }
   deleteTowards(dir: Direction, cursor: Cursor) {
-    MathCommand.prototype.deleteTowards.call(this, dir, cursor);
+    cursor[dir] = this.remove()[dir];
   }
 
   selectOutOf(dir: Direction, cursor: Cursor) {
@@ -153,116 +149,17 @@ class TextBlock extends MQNode {
     // backspace and delete at ends of block don't unwrap
     if (this.isEmpty()) cursor.insRightOf(this);
   }
-  write(cursor: Cursor, ch: string) {
-    cursor.show().deleteSelection();
-
-    if (ch !== '$') {
-      let cursorL = cursor[L];
-      if (!cursorL) new TextPiece(ch).createLeftOf(cursor);
-      else if (cursorL instanceof TextPiece) cursorL.appendText(ch);
-    } else if (this.isEmpty()) {
-      cursor.insRightOf(this);
-      new VanillaSymbol('\\$', h.text('$')).createLeftOf(cursor);
-    } else if (!cursor[R]) cursor.insRightOf(this);
-    else if (!cursor[L]) cursor.insLeftOf(this);
-    else {
-      // split apart
-      var leftBlock = new TextBlock();
-      var leftPc = this.getEnd(L);
-      if (leftPc) {
-        leftPc.disown().domFrag().detach();
-        leftPc.adopt(leftBlock, 0, 0);
-      }
-
-      cursor.insLeftOf(this);
-      super.createLeftOf.call(leftBlock, cursor); // micro-optimization, not for correctness
-    }
-    this.bubble(function (node) {
-      node.reflow();
-      return undefined;
-    });
-    // TODO needs tests
-    cursor.controller.aria.alert(ch);
-  }
-  writeLatex(cursor: Cursor, latex: string) {
-    const cursorL = cursor[L];
-    if (!cursorL) new TextPiece(latex).createLeftOf(cursor);
-    else if (cursorL instanceof TextPiece) cursorL.appendText(latex);
-    this.bubble(function (node) {
-      node.reflow();
-      return undefined;
-    });
-  }
+  // @ts-ignore
+  write(cursor: Cursor, ch: string) {}
+  // @ts-ignore
+  writeLatex(cursor: Cursor, latex: string) {}
 
   seek(clientX: number, cursor: Cursor) {
-    cursor.hide();
-    var textPc = TextBlockFuseChildren(this);
-    if (!textPc) return;
-
-    // insert cursor at approx position in DOMTextNode
-    const textNode = this.domFrag().children().oneText();
-    const range = document.createRange();
-    range.selectNodeContents(textNode);
-    var rects = range.getClientRects();
-    if (rects.length === 1) {
-      const { width, left } = rects[0];
-      var avgChWidth = width / this.textContents().length;
-      var approxPosition = Math.round((clientX - left) / avgChWidth);
-      if (approxPosition <= 0) {
-        cursor.insAtLeftEnd(this);
-      } else if (approxPosition >= textPc.textStr.length) {
-        cursor.insAtRightEnd(this);
-      } else {
-        cursor.insLeftOf(textPc.splitRight(approxPosition));
-      }
-    } else {
-      cursor.insAtLeftEnd(this);
-    }
-
-    // move towards mousedown (clientX)
     var displ =
-      clientX - cursor.show().getBoundingClientRectWithoutMargin().left; // displacement
+      clientX - cursor.show().getBoundingClientRectWithoutMargin().left;
     var dir = displ && displ < 0 ? L : R;
-    var prevDispl = dir as number;
-    // displ * prevDispl > 0 iff displacement direction === previous direction
-    while (cursor[dir] && displ * prevDispl > 0) {
-      (cursor[dir] as MQNode).moveTowards(dir, cursor);
-      prevDispl = displ;
-      displ = clientX - cursor.getBoundingClientRectWithoutMargin().left;
-    }
-    if (dir * displ < -dir * prevDispl)
-      (cursor[-dir as Direction] as MQNode).moveTowards(
-        -dir as Direction,
-        cursor
-      );
-
-    if (!cursor.anticursor) {
-      // about to start mouse-selecting, the anticursor is gonna get put here
-      const cursorL = cursor[L];
-      this.anticursorPosition =
-        cursorL && (cursorL as TextPiece).textStr.length;
-      // ^ get it? 'cos if there's no cursor[L], it's 0... I'm a terrible person.
-    } else if (cursor.anticursor.parent === this) {
-      // mouse-selecting within this TextBlock, re-insert the anticursor
-      const cursorL = cursor[L];
-      var cursorPosition = cursorL && (cursorL as TextPiece).textStr.length;
-      if (this.anticursorPosition === cursorPosition) {
-        cursor.anticursor = Anticursor.fromCursor(cursor);
-      } else {
-        if (this.anticursorPosition! < cursorPosition!) {
-          var newTextPc = (cursorL as any as TextPiece).splitRight(
-            this.anticursorPosition!
-          );
-          cursor[L] = newTextPc;
-        } else {
-          const cursorR = cursor[R] as any as TextPiece;
-          var newTextPc = cursorR.splitRight(
-            this.anticursorPosition! - cursorPosition!
-          );
-        }
-        cursor.anticursor = new Anticursor(this, newTextPc[L], newTextPc);
-      }
-    }
+    cursor.insDirOf(dir, this);
+    cursor.controller.aria.queueDirOf(dir).queue(this);
   }
 
   blur(cursor: Cursor) {
@@ -273,10 +170,6 @@ class TextBlock extends MQNode {
       if (cursor[L] === this) cursor[L] = this[L];
       else if (cursor[R] === this) cursor[R] = this[R];
     } else TextBlockFuseChildren(this);
-  }
-
-  focus() {
-    MathBlock.prototype.focus.call(this);
   }
 }
 
